@@ -43,7 +43,7 @@ Suck My Doc is a powerful Python-based tool designed to effortlessly extract and
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/suck-my-doc.git
+   git clone https://github.com/gremlin-labs/suck-my-doc.git
    cd suck-my-doc
    ```
 
