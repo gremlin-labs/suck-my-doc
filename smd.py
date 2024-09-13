@@ -49,95 +49,58 @@ def setup_webdriver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     return webdriver.Chrome(service=chrome_service, options=chrome_options)
 
-def get_navigation_links(url, driver):
-    driver.get(url)
-    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-    time.sleep(2)  # Allow time for dynamic content to load
-
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    links = []
-
-    nav_elements = soup.find_all(['nav', 'ul', 'ol', 'div'], class_=['navigation', 'menu', 'sidebar'])
-
-    if not nav_elements:
-        nav_elements = [soup]
-
-    for nav in nav_elements:
-        for a in nav.find_all('a', href=True):
-            href = a['href']
-            text = a.get_text(strip=True)
-            if text and is_valid_url(href, base_url):
-                links.append({"title": text, "url": urljoin(base_url, href)})
-
-    return list({v['url']: v for v in links}.values())  # Remove duplicates
-
 def is_valid_url(url, base_url):
     parsed_url = urlparse(urljoin(base_url, url))
     parsed_base = urlparse(base_url)
     return (parsed_url.netloc == parsed_base.netloc and
             (scrape_all or '/docs' in parsed_url.path or parsed_url.path == parsed_base.path))
 
-def scrape_page(url, driver):
-    driver.get(url)
-    try:
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-        time.sleep(1)
+def extract_section_content(section):
+    title = section.find(['h1', 'h2', 'h3'])
+    title = title.text.strip() if title else "Untitled Section"
 
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-        content = {'url': url}
+    content = ' '.join(p.text.strip() for p in section.find_all('p'))
 
-        content['title'] = soup.find('h1').get_text(strip=True) if soup.find('h1') else soup.title.string
+    code_examples = [code.text.strip() for code in section.find_all('pre')]
 
-        main_content = extract_main_content(soup)
-        content['content'] = main_content
-
-        content['code_examples'] = [code.get_text(strip=True) for code in soup.find_all('pre')]
-
-        faqs = extract_faqs(soup)
-        if faqs:
-            content['faq'] = faqs
-
-        return content
-    except Exception as e:
-        print(f"Error scraping {url}: {e}")
-        return None
-
-def extract_main_content(soup):
-    main_selectors = ['[role="main"]', '.main-content', '#main-content', '.content', '#content', 'article', '.docSearch-content']
-    for selector in main_selectors:
-        main = soup.select_one(selector)
-        if main:
-            return ' '.join(p.get_text(strip=True) for p in main.find_all('p'))
-
-    return ' '.join(p.get_text(strip=True) for p in soup.find_all('p'))
-
-def extract_faqs(soup):
-    faq_selectors = ['.faq', '.faqs', '#faq', '#faqs']
-    for selector in faq_selectors:
-        faq_section = soup.select_one(selector)
-        if faq_section:
-            return [
-                {
-                    "question": q.get_text(strip=True),
-                    "answer": a.get_text(strip=True)
-                }
-                for q, a in zip(faq_section.find_all('h3'), faq_section.find_all('p'))
-            ]
-    return []
+    return {
+        "title": title,
+        "content": content,
+        "code_examples": code_examples
+    }
 
 def crawl_links(url, visited_urls, sections, driver):
     if url in visited_urls:
         return
     visited_urls.add(url)
-    print(f"Scraping section: ({url})")
-    section_data = scrape_page(url, driver)
-    if section_data:
+    print(f"Scraping page: {url}")
+
+    driver.get(url)
+    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+    time.sleep(2)  # Allow time for dynamic content to load
+
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+    # Extract all sections from the page
+    main_content = soup.find('main') or soup.find('body')
+    section_elements = main_content.find_all(['section', 'div'], class_=['section', 'chapter'])
+
+    if not section_elements:
+        # If no sections found, treat the whole page as one section
+        section_elements = [main_content]
+
+    for section in section_elements:
+        section_data = extract_section_content(section)
+        section_data["url"] = url
         sections.append((url, section_data))
 
-        new_links = get_navigation_links(url, driver)
-        for link in new_links:
-            if link['url'] not in visited_urls:
-                crawl_links(link['url'], visited_urls, sections, driver)
+    # Find links to other pages
+    links = soup.find_all('a', href=True)
+    for link in links:
+        href = link['href']
+        full_url = urljoin(url, href)
+        if is_valid_url(full_url, base_url) and full_url not in visited_urls:
+            crawl_links(full_url, visited_urls, sections, driver)
 
 def save_json(data, filename):
     with open(filename, "w", encoding='utf-8') as json_file:
@@ -158,13 +121,14 @@ def main():
     try:
         if solo_mode:
             print(f"Scraping single page in solo mode: {base_url}")
-            section_data = scrape_page(base_url, driver)
-            if section_data:
-                section_name = section_data['title'].lower().replace(' ', '_')
+            sections = []
+            crawl_links(base_url, set(), sections, driver)
+            if sections:
+                section_name = sections[0][1]['title'].lower().replace(' ', '_')
                 section_name = quote(section_name, safe='')
                 output_filename = f"{domain}_docs_section_{section_name}-solo.json"
                 output_path = os.path.join(output_dir, output_filename)
-                save_json(section_data, output_path)
+                save_json(sections[0][1], output_path)
                 print(f"Scraping completed. Data saved to '{output_path}'.")
         else:
             sections = []
@@ -172,7 +136,7 @@ def main():
             crawl_links(base_url, visited_urls, sections, driver)
 
             if split_sections:
-                for url, section_data in sections:
+                for _, section_data in sections:
                     section_name = section_data['title'].lower().replace(' ', '_')
                     section_name = quote(section_name, safe='')
                     output_filename = f"{domain}_docs_section_{section_name}.json"
